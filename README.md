@@ -12,8 +12,8 @@ Bu rehber, bir JavaScript kodunu hem tarayıcı konsolunda çalıştırmak hem d
 4. Aşağıdaki gibi JavaScript kodunuzu yapıştırıp `Enter`’a basın:
 
 ```javascript
-// Buraya kodunuzu yazın
 alert("Merhaba, bu bir konsol komutudur!");
+console-enter içerisindeki kodu kopyalayıp çalıştırabilirsiniz.
 ```
 
 ---
@@ -33,6 +33,7 @@ javascript:alert("Merhaba, bu bir bookmarklet!");
     - Ad: İstediğiniz bir isim (ör: Konsol JS)
     - URL: Hazırladığınız bookmarklet kodunu buraya yapıştırın.
 5. Artık herhangi bir sayfadayken bu yer imine tıklayarak kodunuzu çalıştırabilirsiniz.
+   bookmarkdaki kodu url kısmına yapıştırarak kodu kullanabilirsiniz.
 
 ---
 
