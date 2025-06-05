@@ -1,0 +1,379 @@
+(function(){
+    // Yapılandırma
+    const CONFIG = {
+        requestDelay: 100, // MS cinsinden istekler arası gecikme
+        batchSize: 50, // Bir seferde işlenecek maksimum öğe sayısı
+        timeout: 5000, // MS cinsinden istek zaman aşımı
+        retryAttempts: 3, // Başarısız istekler için yeniden deneme sayısı
+        maxResults: 10000 // Maksimum sonuç sayısı
+    };
+
+    // Veri yapıları
+    const store = {
+        results: new Set(),
+        paramMap: new Map(),
+        jsFiles: new Set(),
+        statusMap: new Map(),
+        processing: false,
+        requestQueue: [],
+        failedRequests: new Map()
+    };
+
+    // Rate limiter
+    class RateLimiter {
+        constructor(delay) {
+            this.delay = delay;
+            this.queue = [];
+            this.processing = false;
+        }
+
+        async add(fn) {
+            return new Promise((resolve, reject) => {
+                this.queue.push({ fn, resolve, reject });
+                if (!this.processing) this.process();
+            });
+        }
+
+        async process() {
+            if (this.queue.length === 0) {
+                this.processing = false;
+                return;
+            }
+
+            this.processing = true;
+            const { fn, resolve, reject } = this.queue.shift();
+
+            try {
+                const result = await fn();
+                resolve(result);
+            } catch (error) {
+                reject(error);
+            }
+
+            setTimeout(() => this.process(), this.delay);
+        }
+    }
+
+    const rateLimiter = new RateLimiter(CONFIG.requestDelay);
+
+    // Gelişmiş fetch fonksiyonu
+    async function enhancedFetch(url, options = {}) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), CONFIG.timeout);
+
+        options.signal = controller.signal;
+        let attempts = 0;
+
+        while (attempts < CONFIG.retryAttempts) {
+            try {
+                const response = await fetch(url, options);
+                clearTimeout(timeoutId);
+                return response;
+            } catch (error) {
+                attempts++;
+                if (attempts === CONFIG.retryAttempts) throw error;
+                await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
+            }
+        }
+    }
+
+    // Durum kontrolü
+    async function fetchStatus(url) {
+        return rateLimiter.add(async () => {
+            try {
+                const response = await enhancedFetch(url, { method: 'HEAD' });
+                store.statusMap.set(url, response.status);
+            } catch (error) {
+                store.statusMap.set(url, 'Error');
+                store.failedRequests.set(url, error.message);
+            }
+        });
+    }
+
+    // İçerik işleme
+    function processContent(content, src) {
+        const regex = /(["'`])\/[a-zA-Z0-9_?&=\/\-\#\.]*?(?=\1)/g;
+        const jsRegex = /(["'`])(?:\/|https?:\/\/)[a-zA-Z0-9_?&=\/\-\#\.]+\.js(?:\?[^"'`]*)?(?=\1)/g;
+
+        let match;
+        while ((match = regex.exec(content)) !== null && store.results.size < CONFIG.maxResults) {
+            const endpoint = match[0].slice(1);
+            store.results.add(endpoint);
+            
+            const fullUrl = endpoint.startsWith("http") ? endpoint : window.location.origin + endpoint;
+            store.requestQueue.push(() => fetchStatus(fullUrl));
+
+            const params = endpoint.split('?')[1];
+            if (params) {
+                params.split('&').forEach(param => {
+                    const key = param.split('=')[0];
+                    if (key) {
+                        if (!store.paramMap.has(key)) store.paramMap.set(key, new Set());
+                        store.paramMap.get(key).add(src || 'Inline script or HTML');
+                    }
+                });
+            }
+        }
+
+        while ((match = jsRegex.exec(content)) !== null && store.jsFiles.size < CONFIG.maxResults) {
+            store.jsFiles.add(match[0].slice(1));
+        }
+    }
+
+    // Sonuçları yazdırma
+    function writeResults() {
+        if (store.processing) return;
+        store.processing = true;
+
+        const div = document.createElement("div");
+        div.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: #f0f8ff;
+            color: #333;
+            overflow: auto;
+            z-index: 9999;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+        `;
+
+        const domain = window.location.hostname;
+        const dorkingLinks = [
+            // 1. Web Sayfalarını Bulma
+            `https://www.google.com/search?q=site:${domain}+intitle:"index of"+inurl:admin`,  // Admin dizini veya paneli
+            `https://www.google.com/search?q=site:${domain}+inurl:"/admin/"`,  // Admin paneline ulaşmak
+            `https://www.google.com/search?q=site:${domain}+intitle:"index of"+inurl:login`,  // Login sayfası
+            `https://www.google.com/search?q=site:${domain}+inurl:"wp-login.php"`,  // WordPress login sayfası
+            `https://www.google.com/search?q=site:${domain}+intitle:"error"+inurl:php`,  // PHP hataları içeren sayfalar
+
+            // 2. Dosya Türlerini Arama (File Dorks)
+            `https://www.google.com/search?q=site:${domain}+filetype:pdf`,  // PDF dosyaları
+            `https://www.google.com/search?q=site:${domain}+filetype:xls`,  // Excel dosyaları
+            `https://www.google.com/search?q=site:${domain}+filetype:doc`,  // Word dosyaları
+            `https://www.google.com/search?q=site:${domain}+filetype:ppt`,  // PowerPoint dosyaları
+            `https://www.google.com/search?q=site:${domain}+filetype:sql`,  // SQL dump dosyaları
+            `https://www.google.com/search?q=site:${domain}+filetype:xml`,  // XML dosyaları
+
+            // 3. Yapılandırma Dosyalarını Arama
+            `https://www.google.com/search?q=site:${domain}+filetype:ini`,  // .ini yapılandırma dosyaları
+            `https://www.google.com/search?q=site:${domain}+filetype:conf`,  // .conf dosyaları
+            `https://www.google.com/search?q=site:${domain}+filetype:env`,  // .env dosyaları
+            `https://www.google.com/search?q=site:${domain}+filetype:bak`,  // Yedek dosyaları
+
+            // 4. Veritabanı Bilgileri ve Yedekler
+            `https://www.google.com/search?q=site:${domain}+filetype:sql+inurl:"dump"`,  // Veritabanı yedekleri
+            `https://www.google.com/search?q=site:${domain}+filetype:sql+intext:"password"`,  // Parola bilgileri içeren SQL dump
+            `https://www.google.com/search?q=site:${domain}+intitle:"phpMyAdmin"+inurl:"index.php"`,  // PhpMyAdmin erişimi
+
+            // 5. Web Uygulaması Güvenlik Testleri
+            `https://www.google.com/search?q=site:${domain}+inurl:"/admin/login"`,  // Admin login paneli
+            `https://www.google.com/search?q=site:${domain}+intitle:"404 Not Found"+inurl:/.git/`,  // Git repository bilgileri
+            `https://www.google.com/search?q=site:${domain}+intitle:"Forbidden"+inurl:/wp-content/`,  // WordPress içerik dizini
+
+            // 6. Hatalar ve Güvenlik Açıkları
+            `https://www.google.com/search?q=site:${domain}+inurl:"error_log"`,  // Hata loglarını
+            `https://www.google.com/search?q=site:${domain}+inurl:"server-status"`,  // Apache server-status
+            `https://www.google.com/search?q=site:${domain}+intitle:"unauthorized"+inurl:"/admin/"`,  // Yetkisiz erişim hatası
+
+            // 7. Diğer Güvenlik Testleri
+            `https://www.google.com/search?q=site:${domain}+inurl:".git/config"`,  // Git konfigurasyon dosyası
+            `https://www.google.com/search?q=site:${domain}+intitle:"index of"+inurl:backup`,  // Yedekleme dosyaları
+            `https://www.google.com/search?q=site:${domain}+inurl:"/upload/"`,  // Web upload dizinlerini
+            `https://www.google.com/search?q=site:${domain}+intitle:"PHPinfo"+inurl:"phpinfo.php"`,  // PHP yapılandırma bilgileri
+            `https://www.google.com/search?q=site:${domain}+inurl:"wp-config.php"`,  // WordPress yapılandırma dosyası
+
+            // 8. Kullanıcı Bilgileri ve Şifreler
+            `https://www.google.com/search?q=site:${domain}+intext:"username"+intext:"password"`,  // Kullanıcı adı ve şifre içeren sayfalar
+            `https://www.google.com/search?q=site:${domain}+intitle:"login"+inurl:"login.php"`,  // Giriş formları
+
+            // 9. Kritik Bilgiler ve Özel Dosyalar
+            `https://www.google.com/search?q=site:${domain}+intitle:"Index of"+inurl:"/private/"`,  // Özel dizinler
+            `https://www.google.com/search?q=site:${domain}+inurl:"/uploads/" filetype:pdf`,  // Upload dizinindeki PDF dosyaları
+            `https://www.google.com/search?q=site:${domain}+inurl:"/files/" filetype:doc`,  // Belirli dizinlerdeki Word dosyaları
+
+            // 10. Servis ve Yönetim Arayüzleri
+            `https://www.google.com/search?q=site:${domain}+inurl:"/admin/"+intitle:"admin"`,  // Admin paneli
+            `https://www.google.com/search?q=site:${domain}+intitle:"index of"+inurl:"uploads"`,  // Dosya yükleme alanları
+            `https://www.google.com/search?q=site:${domain}+inurl:"/cgi-bin/"`,  // CGI script'leri
+
+            // 11. Web Sunucu Bilgileri
+            `https://www.google.com/search?q=site:${domain}+intitle:"Apache2 Ubuntu Default Page"`,  // Apache varsayılan sayfası
+            `https://www.google.com/search?q=site:${domain}+intitle:"IIS"+inurl:"iisreset"`,  // IIS hata ve bilgi sayfaları
+
+            // 12. Hassas Dosyalar ve Veritabanları
+            `https://www.google.com/search?q=site:${domain}+inurl:"/phpmyadmin"`,  // PhpMyAdmin erişimi
+            `https://www.google.com/search?q=site:${domain}+intitle:"index of"+inurl:"backup"`,  // Yedekleme dosyaları
+
+            // 13. Şifreli ve Veritabanı Dosyaları
+            `https://www.google.com/search?q=site:${domain}+filetype:csv+inurl:"passwords"`,  // Şifre içeren CSV dosyaları
+            `https://www.google.com/search?q=site:${domain}+inurl:"db" filetype:sql`,  // SQL veritabanı dosyaları
+
+            // 14. Diğer Yöntemler
+            `https://www.google.com/search?q=site:${domain}+intext:"Welcome to nginx!"`,  // Nginx sunucusu
+            `https://www.google.com/search?q=site:${domain}+intitle:"index of"+inurl:"backups"`,  // Yedekleme dosyaları
+
+            // 15. Gelişmiş Dosya Arama
+            `https://www.google.com/search?q=site:${domain}+filetype:pdf+intext:"confidential"`,  // Gizli içerikli PDF dosyaları
+            `https://www.google.com/search?q=site:${domain}+filetype:sql+intext:"DROP DATABASE"`,  // Veritabanı silme komutlarını içeren SQL dosyaları
+            `https://www.google.com/search?q=site:${domain}+filetype:log+intext:"error"`,  // Hata logları
+
+            // Ek Dorklar
+            `https://www.google.com/search?q=site:${domain}+inurl:admin`,
+            `https://www.google.com/search?q=site:${domain}+inurl:login`,
+            `https://www.google.com/search?q=site:${domain}+inurl:wp-login.php`,
+            `https://www.google.com/search?q=site:${domain}+inurl:config`,
+            `https://www.google.com/search?q=site:${domain}+inurl:/.git`,
+            `https://www.google.com/search?q=site:${domain}+inurl:.env`,
+            `https://www.google.com/search?q=site:${domain}+intitle:index.of+passwd`,
+            `https://www.google.com/search?q=site:${domain}+intitle:index.of+backup`,
+            `https://www.google.com/search?q=site:${domain}+intitle:index.of+confidential`,
+            `https://www.google.com/search?q=site:${domain}+filetype:sql`,
+            `https://www.google.com/search?q=site:${domain}+filetype:xml`,
+            `https://www.google.com/search?q=site:${domain}+filetype:json`,
+            `https://www.google.com/search?q=site:${domain}+filetype:bak`,
+            `https://www.google.com/search?q=site:${domain}+filetype:log`,
+            `https://www.google.com/search?q=site:${domain}+filetype:zip`,
+            `https://www.google.com/search?q=site:${domain}+filetype:tar`,
+            `https://www.google.com/search?q=site:${domain}+inurl:phpinfo.php`,
+            `https://www.google.com/search?q=site:${domain}+inurl:/uploads/`,
+            `https://www.google.com/search?q=site:${domain}+inurl:/images/`,
+            `https://www.google.com/search?q=site:${domain}+inurl:/backup/`,
+            `https://www.google.com/search?q=site:${domain}+inurl:/assets/`,
+            `https://www.google.com/search?q=site:${domain}+inurl:/files/`,
+            `https://www.google.com/search?q=site:${domain}+inurl:/tmp/`,
+            `https://www.google.com/search?q=site:${domain}+inurl:/log/`,
+            `https://www.google.com/search?q=site:${domain}+inurl:/private/`,
+            `https://www.google.com/search?q=site:${domain}+intitle:"Index of"`,
+            `https://www.google.com/search?q=site:${domain}+ext:env`,
+            `https://www.google.com/search?q=site:${domain}+ext:bak`,
+            `https://www.google.com/search?q=site:${domain}+ext:sql`,
+            `https://www.google.com/search?q=site:${domain}+ext:xml`,
+            `https://www.google.com/search?q=site:${domain}+ext:json`,
+            `https://www.google.com/search?q=site:${domain}+ext:php`,
+            `https://www.google.com/search?q=site:${domain}+ext:asp`,
+            `https://www.google.com/search?q=site:${domain}+ext:aspx`,
+            `https://www.google.com/search?q=site:${domain}+ext:cfm`,
+            `https://www.google.com/search?q=site:${domain}+ext:jsp`,
+            `https://www.google.com/search?q=site:${domain}+ext:html`,
+            `https://www.google.com/search?q=site:${domain}+ext:htm`,
+            `https://www.google.com/search?q=site:${domain}+ext:pl`,
+            `https://www.google.com/search?q=site:${domain}+ext:rb`,
+            `https://www.google.com/search?q=site:${domain}+ext:py`,
+            `https://www.google.com/search?q=site:${domain}+ext:sh`
+        ];
+
+        let content = `<h2 style='color:#4a69bd;'>Endpoints Found: ${store.results.size}</h2>`;
+
+        // Sonuçları göster
+        content += `<div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;'>`;
+        Array.from(store.results).forEach(endpoint => {
+            const fullUrl = endpoint.startsWith("http") ? endpoint : window.location.origin + endpoint;
+            const status = store.statusMap.get(fullUrl) || 'Loading...';
+            const error = store.failedRequests.get(fullUrl);
+            
+            content += `
+                <div style='background:#fff;padding:10px;border-left:5px solid #4a69bd;'>${endpoint}</div>
+                <div style='background:#fff;padding:10px;border-left:5px solid #4a69bd;'>
+                    <a href='${fullUrl}' target='_blank' style='color:#4a69bd;text-decoration:none;word-break:break-all;'>${fullUrl}</a>
+                    ${error ? `<br><small style="color:red">Error: ${error}</small>` : ''}
+                </div>
+                <div style='background:#fff;padding:10px;border-left:5px solid #4a69bd;'>${status}</div>
+            `;
+        });
+        content += `</div>`;
+
+        // Parametreleri göster
+        content += `<h2 style='color:#4a69bd;margin-top:20px;'>Parameters Found:</h2>`;
+        content += `<div style='display:grid;grid-template-columns:1fr 1fr;gap:10px;'>`;
+        store.paramMap.forEach((sources, param) => {
+            content += `
+                <div style='background:#fff;padding:10px;border-left:5px solid #4a69bd;'>${param}</div>
+                <div style='background:#fff;padding:10px;border-left:5px solid #4a69bd;'>
+                    ${Array.from(sources).join('<br>')}
+                </div>
+            `;
+        });
+        content += `</div>`;
+
+        // JS dosyalarını göster
+        content += `<h2 style='color:#4a69bd;margin-top:20px;'>JS Files Found: ${store.jsFiles.size}</h2>`;
+        content += `<div style='display:grid;grid-template-columns:1fr;gap:10px;'>`;
+        store.jsFiles.forEach(file => {
+            const fullUrl = file.startsWith("http") ? file : window.location.origin + file;
+            content += `
+                <div style='background:#fff;padding:10px;border-left:5px solid #4a69bd;'>
+                    <a href='${fullUrl}' target='_blank' style='color:#4a69bd;text-decoration:none;word-break:break-all;'>
+                        ${file}
+                    </a>
+                </div>
+            `;
+        });
+        content += `</div>`;
+
+        // Dorking linklerini göster
+        content += `<h2 style='color:#4a69bd;margin-top:20px;'>Google Dorking Links:</h2>`;
+        content += `<div style='display:grid;grid-template-columns:1fr;gap:10px;'>`;
+        dorkingLinks.forEach((link, index) => {
+            if (link.includes('//')) {
+                const comment = link.split('//')[1].trim();
+                content += `<h3 style='color:#4a69bd;margin-top:15px;'>${comment}</h3>`;
+            } else {
+                content += `
+                    <div style='background:#fff;padding:10px;border-left:5px solid #4a69bd;'>
+                        <a href='${link}' target='_blank' style='color:#4a69bd;text-decoration:none;word-break:break-all;'>
+                            ${link}
+                        </a>
+                    </div>
+                `;
+            }
+        });
+        content += `</div>`;
+
+        div.innerHTML = content;
+
+        // Kapatma butonu
+        const closeBtn = document.createElement("button");
+        closeBtn.textContent = "Close";
+        closeBtn.style.cssText = "position:fixed;top:10px;right:10px;background:#4a69bd;color:white;border:none;padding:10px 20px;cursor:pointer;";
+        closeBtn.onclick = () => document.body.removeChild(div);
+        div.appendChild(closeBtn);
+
+        document.body.appendChild(div);
+    }
+
+    // Script işleme
+    async function processScripts() {
+        const scripts = document.getElementsByTagName("script");
+        
+        for (let script of scripts) {
+            if (script.src) {
+                store.jsFiles.add(script.src);
+                try {
+                    const response = await enhancedFetch(script.src);
+                    const text = await response.text();
+                    processContent(text, script.src);
+                } catch (error) {
+                    console.warn("Error fetching script:", error);
+                }
+            } else {
+                processContent(script.textContent, 'Inline script');
+            }
+        }
+        
+        processContent(document.documentElement.outerHTML, 'Page content');
+
+        // İstek kuyruğunu işle
+        for (let i = 0; i < store.requestQueue.length; i += CONFIG.batchSize) {
+            const batch = store.requestQueue.slice(i, i + CONFIG.batchSize);
+            await Promise.all(batch.map(request => request()));
+        }
+
+        writeResults();
+    }
+
+    // Başlat
+    processScripts().catch(console.error);
+})();
